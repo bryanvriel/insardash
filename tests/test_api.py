@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from backend.main import create_app
+from tests.test_hdf5_store import write_fixture
+
+
+def test_api_dataset_preview_sample_and_transect(tmp_path: Path) -> None:
+    write_fixture(tmp_path / "igram_a.h5")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    listing = client.get("/api/datasets")
+    assert listing.status_code == 200
+    dataset_id = listing.json()[0]["id"]
+
+    preview = client.get(f"/api/datasets/{dataset_id}/preview", params={"band": "unwrapped_phase"})
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "image/png"
+
+    sample = client.post(
+        "/api/sample-point",
+        json={"dataset_ids": [dataset_id], "lat": 34.5, "lon": -117.5, "band": "unwrapped_phase"},
+    )
+    assert sample.status_code == 200
+    assert sample.json()["samples"][0]["in_bounds"] is True
+
+    transect = client.post(
+        "/api/transect",
+        json={
+            "dataset_ids": [dataset_id],
+            "band": "unwrapped_phase",
+            "points": [{"lat": 34.95, "lon": -117.95}, {"lat": 34.05, "lon": -117.05}],
+            "samples": 24,
+        },
+    )
+    assert transect.status_code == 200
+    assert len(transect.json()["profiles"][0]["values"]) == 24
