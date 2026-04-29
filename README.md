@@ -20,7 +20,7 @@ The MVP assumes regular, monotonic latitude and longitude axes.
 Backend commands use the requested interpreter:
 
 ```bash
-/Users/briel/miniforge3/envs/ice/bin/python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
 Frontend commands use npm:
@@ -34,7 +34,7 @@ npm run build
 Optional sample data:
 
 ```bash
-/Users/briel/miniforge3/envs/ice/bin/python3 scripts/make_sample_data.py
+python3 scripts/make_sample_data.py
 ```
 
 ## Run For A Class
@@ -42,8 +42,8 @@ Optional sample data:
 From the repository root:
 
 ```bash
-INSARDASH_DATA_DIR=/Users/briel/src/insardash/data \
-/Users/briel/miniforge3/envs/ice/bin/python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+INSARDASH_DATA_DIR=insardash/data \
+python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
 Students on the university network can open:
@@ -64,7 +64,7 @@ The Vite dev server proxies `/api` requests to the backend.
 ## Tests
 
 ```bash
-/Users/briel/miniforge3/envs/ice/bin/python3 -m pytest
+python3 -m pytest
 cd frontend
 npm run build
 ```
