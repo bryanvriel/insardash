@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
   Check,
   Layers,
@@ -105,6 +106,14 @@ type TransectResponse = {
 const COLORMAPS = ["viridis", "plasma", "inferno", "magma", "turbo", "gray", "twilight", "RdBu_r"];
 const MAP_SLOTS = [0, 1, 2];
 const HOVER_THROTTLE_MS = 50;
+const DEFAULT_PROFILE_HEIGHT_PX = 288;
+const MIN_PROFILE_HEIGHT_PX = 192;
+const MIN_MAP_ROW_HEIGHT_PX = 288;
+const MAX_PROFILE_HEIGHT_RATIO = 0.55;
+const RESIZE_STEP_PX = 16;
+const RESIZE_LARGE_STEP_PX = 48;
+const TWO_COLUMN_LAYOUT_MEDIA = "(max-width: 1120px)";
+const STACKED_LAYOUT_MEDIA = "(max-width: 780px)";
 const TRANSECT_COLORS = ["#d94f35", "#0b8f7a", "#6d5dfc", "#c47b00", "#0077b6", "#b2386b"];
 const PlotComponent = Plot as any;
 
@@ -374,6 +383,8 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<Array<string | null>>([null, null, null]);
   const [activeBand, setActiveBand] = useState("");
   const [mapColorSettings, setMapColorSettings] = useState<MapColorSettings[]>(() => MAP_SLOTS.map(() => defaultMapColorSettings()));
+  const [profileHeightPx, setProfileHeightPx] = useState(DEFAULT_PROFILE_HEIGHT_PX);
+  const [isProfileResizing, setIsProfileResizing] = useState(false);
   const [drawing, setDrawing] = useState(false);
   const [draftPoints, setDraftPoints] = useState<GeoPoint[]>([]);
   const [transects, setTransects] = useState<Transect[]>([]);
@@ -382,11 +393,42 @@ export default function App() {
   const [viewport, setViewport] = useState<Viewport | null>(null);
   const [status, setStatus] = useState("Loading datasets...");
   const [profileStatus, setProfileStatus] = useState("");
+  const workspaceRef = useRef<HTMLElement | null>(null);
   const hoverTimer = useRef<number | null>(null);
   const hoverAbort = useRef<AbortController | null>(null);
   const hoverRequestId = useRef(0);
   const pendingHoverPoint = useRef<GeoPoint | null>(null);
   const lastHoverRequestAt = useRef(0);
+  const profileResize = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+
+  const getProfileHeightBounds = useCallback(() => {
+    const workspace = workspaceRef.current;
+    const workspaceHeight = workspace?.getBoundingClientRect().height ?? window.innerHeight;
+    const rowGap = workspace ? Number.parseFloat(window.getComputedStyle(workspace).rowGap || "0") || 0 : 12;
+    const readoutPanel = workspace?.querySelector<HTMLElement>(".readout-panel") ?? null;
+    const readoutRowHeight =
+      window.matchMedia(TWO_COLUMN_LAYOUT_MEDIA).matches && !window.matchMedia(STACKED_LAYOUT_MEDIA).matches
+        ? readoutPanel?.getBoundingClientRect().height ?? 0
+        : 0;
+    const rowGapCount = readoutRowHeight > 0 ? 2 : 1;
+    const maxByRatio = workspaceHeight * MAX_PROFILE_HEIGHT_RATIO;
+    const maxByMap = workspaceHeight - MIN_MAP_ROW_HEIGHT_PX - readoutRowHeight - rowGap * rowGapCount;
+    const max = Math.max(MIN_PROFILE_HEIGHT_PX, Math.min(maxByRatio, maxByMap));
+    return { min: MIN_PROFILE_HEIGHT_PX, max: Math.round(max) };
+  }, []);
+
+  const clampProfileHeight = useCallback(
+    (height: number) => {
+      const { min, max } = getProfileHeightBounds();
+      return Math.round(Math.min(Math.max(height, min), max));
+    },
+    [getProfileHeightBounds]
+  );
+
+  const profileHeightBounds = getProfileHeightBounds();
+  const workspaceStyle: CSSProperties & { "--profile-height": string } = {
+    "--profile-height": `${profileHeightPx}px`
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -528,6 +570,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const handleResize = () => {
+      setProfileHeightPx((height) => clampProfileHeight(height));
+    };
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [clampProfileHeight]);
+
+  useEffect(() => {
+    const animationFrame = window.requestAnimationFrame(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [profileHeightPx]);
+
+  useEffect(() => {
     if (transects.length === 0 || selectedIdList.length === 0 || !activeBand) {
       setProfileResponses({});
       return;
@@ -585,6 +643,64 @@ export default function App() {
     );
   }
 
+  function startProfileResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (window.matchMedia(STACKED_LAYOUT_MEDIA).matches) {
+      return;
+    }
+    event.preventDefault();
+    profileResize.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: profileHeightPx
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsProfileResizing(true);
+  }
+
+  function updateProfileResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = profileResize.current;
+    if (!resize || resize.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    const nextHeight = resize.startHeight - (event.clientY - resize.startY);
+    setProfileHeightPx(clampProfileHeight(nextHeight));
+  }
+
+  function stopProfileResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = profileResize.current;
+    if (!resize || resize.pointerId !== event.pointerId) {
+      return;
+    }
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    profileResize.current = null;
+    setIsProfileResizing(false);
+  }
+
+  function handleProfileResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    let nextHeight: number | null = null;
+    if (event.key === "ArrowUp") {
+      nextHeight = profileHeightPx + RESIZE_STEP_PX;
+    } else if (event.key === "ArrowDown") {
+      nextHeight = profileHeightPx - RESIZE_STEP_PX;
+    } else if (event.key === "PageUp") {
+      nextHeight = profileHeightPx + RESIZE_LARGE_STEP_PX;
+    } else if (event.key === "PageDown") {
+      nextHeight = profileHeightPx - RESIZE_LARGE_STEP_PX;
+    } else if (event.key === "Home") {
+      nextHeight = profileHeightBounds.min;
+    } else if (event.key === "End") {
+      nextHeight = profileHeightBounds.max;
+    }
+    if (nextHeight === null) {
+      return;
+    }
+    event.preventDefault();
+    setProfileHeightPx(clampProfileHeight(nextHeight));
+  }
+
   function finishDraft() {
     if (draftPoints.length < 2) {
       return;
@@ -624,7 +740,11 @@ export default function App() {
         </div>
       </header>
 
-      <main className="workspace">
+      <main
+        ref={workspaceRef}
+        className={isProfileResizing ? "workspace profile-resizing" : "workspace"}
+        style={workspaceStyle}
+      >
         <aside className="control-panel" aria-label="Display controls">
           <section className="control-section">
             <h2><Layers size={17} /> Maps</h2>
@@ -806,6 +926,26 @@ export default function App() {
         </section>
 
         <section className="profile-panel" aria-label="Transect profile plot">
+          <div
+            className="profile-resize-handle"
+            role="separator"
+            aria-label="Resize profiles panel"
+            aria-orientation="horizontal"
+            aria-valuemin={profileHeightBounds.min}
+            aria-valuemax={profileHeightBounds.max}
+            aria-valuenow={profileHeightPx}
+            tabIndex={0}
+            title="Drag to resize profiles"
+            onPointerDown={startProfileResize}
+            onPointerMove={updateProfileResize}
+            onPointerUp={stopProfileResize}
+            onPointerCancel={stopProfileResize}
+            onLostPointerCapture={() => {
+              profileResize.current = null;
+              setIsProfileResizing(false);
+            }}
+            onKeyDown={handleProfileResizeKeyDown}
+          />
           <div className="profile-heading">
             <h2>Profiles</h2>
             <span>{profileStatus || `${transects.length} transect${transects.length === 1 ? "" : "s"}`}</span>

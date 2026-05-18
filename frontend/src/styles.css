@@ -14,6 +14,7 @@
 html,
 body,
 #root {
+  height: 100%;
   min-height: 100%;
   margin: 0;
 }
@@ -61,7 +62,11 @@ button.primary:hover:not(:disabled) {
 }
 
 .app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
   min-height: 100vh;
+  overflow: hidden;
 }
 
 .app-header {
@@ -100,9 +105,12 @@ button.primary:hover:not(:disabled) {
 
 .workspace {
   display: grid;
+  flex: 1;
   gap: 0.75rem;
   grid-template-columns: 19rem minmax(0, 1fr) 18rem;
-  grid-template-rows: minmax(26rem, calc(100vh - 22rem)) 18rem;
+  grid-template-rows: minmax(18rem, 1fr) var(--profile-height, 18rem);
+  min-height: 0;
+  overflow: hidden;
   padding: 0.75rem;
 }
 
@@ -300,7 +308,7 @@ button.primary:hover:not(:disabled) {
     #eef3f6;
   background-size: 34px 34px;
   flex: 1;
-  min-height: 24rem;
+  min-height: 0;
   width: 100%;
 }
 
@@ -367,6 +375,51 @@ button.primary:hover:not(:disabled) {
   min-height: 0;
   min-width: 0;
   padding: 0.75rem;
+  position: relative;
+}
+
+.profile-resize-handle {
+  background: transparent;
+  border: 0;
+  cursor: row-resize;
+  height: 0.9rem;
+  left: 0.75rem;
+  outline: 0;
+  position: absolute;
+  right: 0.75rem;
+  top: -0.45rem;
+  touch-action: none;
+  z-index: 5;
+}
+
+.profile-resize-handle::before {
+  background: #b8c1cc;
+  border-radius: 999px;
+  content: "";
+  height: 3px;
+  left: 50%;
+  opacity: 0.7;
+  position: absolute;
+  top: calc(50% - 1px);
+  transform: translateX(-50%);
+  width: 4rem;
+}
+
+.profile-resize-handle:hover::before,
+.profile-resize-handle:focus-visible::before,
+.profile-resizing .profile-resize-handle::before {
+  background: #116b68;
+  opacity: 1;
+}
+
+.profile-resize-handle:focus-visible {
+  box-shadow: 0 0 0 3px rgba(17, 107, 104, 0.16);
+}
+
+.profile-resizing,
+.profile-resizing * {
+  cursor: row-resize;
+  user-select: none;
 }
 
 .profile-heading {
@@ -383,7 +436,7 @@ button.primary:hover:not(:disabled) {
 
 .plot {
   flex: 1;
-  min-height: 14rem;
+  min-height: 0;
   width: 100%;
 }
 
@@ -404,10 +457,15 @@ button.primary:hover:not(:disabled) {
   min-height: 100%;
 }
 
+.profile-panel .empty-plot {
+  flex: 1;
+  min-height: 0;
+}
+
 @media (max-width: 1120px) {
   .workspace {
     grid-template-columns: 17rem minmax(0, 1fr);
-    grid-template-rows: minmax(24rem, auto) auto auto;
+    grid-template-rows: minmax(18rem, 1fr) auto var(--profile-height, 18rem);
   }
 
   .readout-panel {
@@ -420,14 +478,21 @@ button.primary:hover:not(:disabled) {
 }
 
 @media (max-width: 780px) {
+  .app-shell {
+    height: auto;
+    overflow: visible;
+  }
+
   .app-header {
     align-items: flex-start;
     flex-direction: column;
   }
 
   .workspace {
+    flex: 0 0 auto;
     grid-template-columns: 1fr;
     grid-template-rows: auto auto auto auto;
+    overflow: visible;
   }
 
   .control-panel,
@@ -443,5 +508,9 @@ button.primary:hover:not(:disabled) {
 
   .map {
     min-height: 20rem;
+  }
+
+  .profile-resize-handle {
+    display: none;
   }
 }
