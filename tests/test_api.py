@@ -27,6 +27,24 @@ def test_api_dataset_preview_sample_and_transect(tmp_path: Path) -> None:
     )
     assert sample.status_code == 200
     assert sample.json()["samples"][0]["in_bounds"] is True
+    assert "coherence" in sample.json()["samples"][0]["values"]
+
+    fast_sample = client.post(
+        "/api/sample-point",
+        json={
+            "dataset_ids": [dataset_id],
+            "lat": 34.5,
+            "lon": -117.5,
+            "band": "unwrapped_phase",
+            "include_all_values": False,
+        },
+    )
+    fast_sample_body = fast_sample.json()["samples"][0]
+    assert fast_sample.status_code == 200
+    assert fast_sample_body["in_bounds"] is True
+    assert fast_sample_body["active_band"] == "unwrapped_phase"
+    assert fast_sample_body["active_value"] is not None
+    assert set(fast_sample_body["values"]) == {"unwrapped_phase"}
 
     transect = client.post(
         "/api/transect",

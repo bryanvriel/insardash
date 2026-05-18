@@ -20,6 +20,16 @@ from .schemas import BandInfo, Bounds, DatasetSummary, RasterShape
 
 
 HDF5_SUFFIXES = {".h5", ".hdf5"}
+RESERVED_DATASET_NAMES = {"lat", "lon", "band_names", "units"}
+PREFERRED_BAND_ORDER = {
+    "wrapped phase": 0,
+    "wrapped_phase": 0,
+    "unwrapped phase": 1,
+    "unwrapped_phase": 1,
+    "coherence": 2,
+    "topography": 3,
+    "dem": 3,
+}
 
 
 class DatasetError(ValueError):
@@ -47,6 +57,45 @@ class DatasetAxes:
             north=float(np.nanmax(self.lat)),
             east=float(np.nanmax(self.lon)),
         )
+
+
+@dataclass
+class RasterLayout:
+    band_names: list[str]
+    units: list[str | None]
+    rows: int
+    cols: int
+    stacked_data: h5py.Dataset | None = None
+    band_datasets: dict[str, h5py.Dataset] | None = None
+
+    @property
+    def n_bands(self) -> int:
+        return len(self.band_names)
+
+    def read_band(self, band: str) -> np.ndarray:
+        if band not in self.band_names:
+            raise KeyError(f"Band {band!r} is not available")
+        if self.stacked_data is not None:
+            return np.asarray(self.stacked_data[self.band_names.index(band)], dtype=np.float32)
+        if self.band_datasets is None:
+            raise DatasetError("No raster band datasets are available")
+        return np.asarray(self.band_datasets[band], dtype=np.float32)
+
+    def read_pixel_values(self, row: int, col: int) -> np.ndarray:
+        if self.stacked_data is not None:
+            return np.asarray(self.stacked_data[:, row, col], dtype=np.float64)
+        if self.band_datasets is None:
+            raise DatasetError("No raster band datasets are available")
+        return np.asarray([self.band_datasets[name][row, col] for name in self.band_names], dtype=np.float64)
+
+    def read_pixel_value(self, band: str, row: int, col: int) -> float:
+        if band not in self.band_names:
+            raise KeyError(f"Band {band!r} is not available")
+        if self.stacked_data is not None:
+            return float(self.stacked_data[self.band_names.index(band), row, col])
+        if self.band_datasets is None:
+            raise DatasetError("No raster band datasets are available")
+        return float(self.band_datasets[band][row, col])
 
 
 def _decode_scalar(value: Any) -> Any:
@@ -79,6 +128,11 @@ def _finite_or_none(value: float) -> float | None:
 def _dataset_id(path: Path) -> str:
     safe = "".join(char if char.isalnum() or char in "-_" else "_" for char in path.stem)
     return safe or "dataset"
+
+
+def _band_sort_key(name: str) -> tuple[int, str]:
+    normalized = name.strip().lower()
+    return PREFERRED_BAND_ORDER.get(normalized, 100), normalized
 
 
 def _haversine_km(lat1: np.ndarray, lon1: np.ndarray, lat2: np.ndarray, lon2: np.ndarray) -> np.ndarray:
@@ -142,10 +196,9 @@ class DatasetStore:
             return cached
 
         with h5py.File(ref.path, "r") as h5:
-            data = self._require_data(h5)
-            axes = self._read_axes(h5, data.shape[1], data.shape[2])
-            band_index = self._band_index(h5, band, data.shape[0])
-            array = np.asarray(data[band_index], dtype=np.float32)
+            layout = self._read_layout(h5)
+            axes = self._read_axes(h5, layout.rows, layout.cols)
+            array = layout.read_band(band)
 
         display = self._orient_for_display(array, axes)
         stride = max(1, math.ceil(max(display.shape) / max_size))
@@ -164,11 +217,12 @@ class DatasetStore:
         lat: float,
         lon: float,
         active_band: str | None = None,
+        include_all_values: bool = True,
     ) -> dict[str, Any]:
         ref = self._get_ref(dataset_id)
         with h5py.File(ref.path, "r") as h5:
-            data = self._require_data(h5)
-            axes = self._read_axes(h5, data.shape[1], data.shape[2])
+            layout = self._read_layout(h5)
+            axes = self._read_axes(h5, layout.rows, layout.cols)
             summary = self.summary(dataset_id)
             row_float, col_float, in_bounds = self._latlon_to_fractional_index(axes, lat, lon)
             if not in_bounds:
@@ -183,14 +237,19 @@ class DatasetStore:
 
             row = int(round(row_float))
             col = int(round(col_float))
-            row = min(max(row, 0), data.shape[1] - 1)
-            col = min(max(col, 0), data.shape[2] - 1)
-            raw_values = np.asarray(data[:, row, col], dtype=np.float64)
-            values = {
-                band.name: _finite_or_none(float(raw_values[band.index]))
-                for band in summary.bands
-            }
+            row = min(max(row, 0), layout.rows - 1)
+            col = min(max(col, 0), layout.cols - 1)
             units = {band.name: band.units for band in summary.bands}
+            if include_all_values:
+                raw_values = layout.read_pixel_values(row, col)
+                values = {
+                    band.name: _finite_or_none(float(raw_values[band.index]))
+                    for band in summary.bands
+                }
+            else:
+                values = {}
+                if active_band is not None and active_band in units:
+                    values[active_band] = _finite_or_none(layout.read_pixel_value(active_band, row, col))
             chosen_band = active_band if active_band in values else None
             return {
                 "dataset_id": dataset_id,
@@ -216,11 +275,10 @@ class DatasetStore:
         for dataset_id in dataset_ids:
             ref = self._get_ref(dataset_id)
             with h5py.File(ref.path, "r") as h5:
-                data = self._require_data(h5)
-                band_index = self._band_index(h5, band, data.shape[0])
-                axes = self._read_axes(h5, data.shape[1], data.shape[2])
+                layout = self._read_layout(h5)
+                axes = self._read_axes(h5, layout.rows, layout.cols)
                 rows, cols, in_bounds = self._latlon_arrays_to_indices(axes, lats, lons)
-                raster = np.asarray(data[band_index], dtype=np.float32)
+                raster = layout.read_band(band)
                 values = map_coordinates(
                     raster,
                     np.vstack([rows, cols]),
@@ -257,11 +315,8 @@ class DatasetStore:
 
     def _read_summary(self, ref: DatasetRef) -> DatasetSummary:
         with h5py.File(ref.path, "r") as h5:
-            data = self._require_data(h5)
-            n_bands, rows, cols = data.shape
-            axes = self._read_axes(h5, rows, cols)
-            band_names = self._read_band_names(h5, n_bands)
-            units = self._read_units(h5, n_bands)
+            layout = self._read_layout(h5)
+            axes = self._read_axes(h5, layout.rows, layout.cols)
             attrs = {key: _decode_scalar(value) for key, value in h5.attrs.items()}
             title = str(attrs.get("title") or attrs.get("name") or ref.path.stem)
             metadata = {
@@ -273,20 +328,55 @@ class DatasetStore:
                 id=ref.id,
                 filename=ref.path.name,
                 title=title,
-                shape=RasterShape(bands=n_bands, rows=rows, cols=cols),
+                shape=RasterShape(bands=layout.n_bands, rows=layout.rows, cols=layout.cols),
                 bounds=axes.bounds,
-                bands=[BandInfo(name=name, index=index, units=units[index]) for index, name in enumerate(band_names)],
+                bands=[BandInfo(name=name, index=index, units=layout.units[index]) for index, name in enumerate(layout.band_names)],
                 metadata=metadata,
             )
 
+    def _read_layout(self, h5: h5py.File) -> RasterLayout:
+        if "data" in h5:
+            data = h5["data"]
+            if not isinstance(data, h5py.Dataset) or data.ndim != 3:
+                raise DatasetError("/data must be a 3D dataset shaped (N_bands, Ny, Nx)")
+            n_bands, rows, cols = data.shape
+            return RasterLayout(
+                band_names=self._read_band_names(h5, n_bands),
+                units=self._read_units(h5, n_bands),
+                rows=rows,
+                cols=cols,
+                stacked_data=data,
+            )
+
+        band_datasets = self._read_top_level_band_datasets(h5)
+        if not band_datasets:
+            raise DatasetError("HDF5 file must include /data or top-level 2D band datasets with /lat and /lon")
+        first = next(iter(band_datasets.values()))
+        rows, cols = first.shape
+        band_names = list(band_datasets.keys())
+        return RasterLayout(
+            band_names=band_names,
+            units=self._read_units_for_band_datasets(h5, band_names),
+            rows=rows,
+            cols=cols,
+            band_datasets=band_datasets,
+        )
+
     @staticmethod
-    def _require_data(h5: h5py.File) -> h5py.Dataset:
-        if "data" not in h5:
-            raise DatasetError("HDF5 file must include a /data dataset")
-        data = h5["data"]
-        if not isinstance(data, h5py.Dataset) or data.ndim != 3:
-            raise DatasetError("/data must be a 3D dataset shaped (N_bands, Ny, Nx)")
-        return data
+    def _read_top_level_band_datasets(h5: h5py.File) -> dict[str, h5py.Dataset]:
+        candidates: dict[str, h5py.Dataset] = {}
+        expected_shape: tuple[int, int] | None = None
+        for name, obj in h5.items():
+            if name in RESERVED_DATASET_NAMES or not isinstance(obj, h5py.Dataset):
+                continue
+            if obj.ndim != 2 or not np.issubdtype(obj.dtype, np.number):
+                continue
+            if expected_shape is None:
+                expected_shape = obj.shape
+            if obj.shape != expected_shape:
+                raise DatasetError("Top-level 2D band datasets must all have the same shape")
+            candidates[name] = obj
+        return {name: candidates[name] for name in sorted(candidates, key=_band_sort_key)}
 
     @staticmethod
     def _read_axes(h5: h5py.File, rows: int, cols: int) -> DatasetAxes:
@@ -342,11 +432,17 @@ class DatasetStore:
             return [None] * n_bands
         return units
 
-    def _band_index(self, h5: h5py.File, band: str, n_bands: int) -> int:
-        names = self._read_band_names(h5, n_bands)
-        if band not in names:
-            raise KeyError(f"Band {band!r} is not available")
-        return names.index(band)
+    @staticmethod
+    def _read_units_for_band_datasets(h5: h5py.File, band_names: list[str]) -> list[str | None]:
+        if "units" in h5:
+            units = _decode_string_array(h5["units"][()])
+            if len(units) == len(band_names):
+                return units
+        resolved: list[str | None] = []
+        for name in band_names:
+            unit = h5[name].attrs.get("units")
+            resolved.append(str(_decode_scalar(unit)) if unit is not None else None)
+        return resolved
 
     @staticmethod
     def _orient_for_display(array: np.ndarray, axes: DatasetAxes) -> np.ndarray:

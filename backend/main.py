@@ -60,7 +60,13 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     def sample_point(request: SamplePointRequest):
         try:
             samples = [
-                store.sample_point(dataset_id, request.lat, request.lon, request.band)
+                store.sample_point(
+                    dataset_id,
+                    request.lat,
+                    request.lon,
+                    request.band,
+                    include_all_values=request.include_all_values,
+                )
                 for dataset_id in request.dataset_ids
             ]
         except KeyError as exc:

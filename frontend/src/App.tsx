@@ -4,7 +4,6 @@ import {
   Layers,
   LocateFixed,
   MousePointer2,
-  Palette,
   Play,
   RotateCcw,
   Spline,
@@ -59,6 +58,18 @@ type Transect = {
   points: GeoPoint[];
 };
 
+type MapColorSettings = {
+  cmap: string;
+  autoScale: boolean;
+  vmin: string;
+  vmax: string;
+};
+
+type SelectedMapSlot = {
+  slotIndex: number;
+  dataset: DatasetSummary;
+};
+
 type PointSample = {
   dataset_id: string;
   title: string;
@@ -92,8 +103,19 @@ type TransectResponse = {
 };
 
 const COLORMAPS = ["viridis", "plasma", "inferno", "magma", "turbo", "gray", "twilight", "RdBu_r"];
+const MAP_SLOTS = [0, 1, 2];
+const HOVER_THROTTLE_MS = 50;
 const TRANSECT_COLORS = ["#d94f35", "#0b8f7a", "#6d5dfc", "#c47b00", "#0077b6", "#b2386b"];
 const PlotComponent = Plot as any;
+
+function defaultMapColorSettings(): MapColorSettings {
+  return {
+    cmap: "viridis",
+    autoScale: true,
+    vmin: "",
+    vmax: ""
+  };
+}
 
 function formatValue(value: number | null | undefined, units?: string | null) {
   if (value === null || value === undefined || Number.isNaN(value)) {
@@ -351,10 +373,7 @@ export default function App() {
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
   const [selectedIds, setSelectedIds] = useState<Array<string | null>>([null, null, null]);
   const [activeBand, setActiveBand] = useState("");
-  const [cmap, setCmap] = useState("viridis");
-  const [autoScale, setAutoScale] = useState(true);
-  const [vmin, setVmin] = useState("");
-  const [vmax, setVmax] = useState("");
+  const [mapColorSettings, setMapColorSettings] = useState<MapColorSettings[]>(() => MAP_SLOTS.map(() => defaultMapColorSettings()));
   const [drawing, setDrawing] = useState(false);
   const [draftPoints, setDraftPoints] = useState<GeoPoint[]>([]);
   const [transects, setTransects] = useState<Transect[]>([]);
@@ -365,6 +384,9 @@ export default function App() {
   const [profileStatus, setProfileStatus] = useState("");
   const hoverTimer = useRef<number | null>(null);
   const hoverAbort = useRef<AbortController | null>(null);
+  const hoverRequestId = useRef(0);
+  const pendingHoverPoint = useRef<GeoPoint | null>(null);
+  const lastHoverRequestAt = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -394,12 +416,19 @@ export default function App() {
     };
   }, []);
 
-  const selectedDatasets = useMemo(
-    () => selectedIds.map((id) => datasets.find((dataset) => dataset.id === id)).filter((dataset): dataset is DatasetSummary => Boolean(dataset)),
+  const selectedMapSlots = useMemo(
+    () =>
+      selectedIds
+        .map((id, slotIndex) => {
+          const dataset = datasets.find((item) => item.id === id);
+          return dataset ? { slotIndex, dataset } : null;
+        })
+        .filter((slot): slot is SelectedMapSlot => Boolean(slot)),
     [datasets, selectedIds]
   );
 
-  const selectedIdList = useMemo(() => selectedDatasets.map((dataset) => dataset.id), [selectedDatasets]);
+  const selectedDatasets = useMemo(() => selectedMapSlots.map((slot) => slot.dataset), [selectedMapSlots]);
+  const selectedIdList = useMemo(() => selectedMapSlots.map((slot) => slot.dataset.id), [selectedMapSlots]);
   const selectedKey = selectedIdList.join("|");
 
   const availableBands = useMemo(() => {
@@ -421,40 +450,82 @@ export default function App() {
     }
   }, [activeBand, availableBands]);
 
+  const flushHover = useCallback(() => {
+    hoverTimer.current = null;
+    const point = pendingHoverPoint.current;
+    pendingHoverPoint.current = null;
+    if (!point || !activeBand || selectedIdList.length === 0) {
+      return;
+    }
+
+    hoverAbort.current?.abort();
+    const controller = new AbortController();
+    const requestId = hoverRequestId.current + 1;
+    hoverRequestId.current = requestId;
+    hoverAbort.current = controller;
+    lastHoverRequestAt.current = window.performance.now();
+    fetch("/api/sample-point", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dataset_ids: selectedIdList,
+        lat: point.lat,
+        lon: point.lon,
+        band: activeBand,
+        include_all_values: false
+      }),
+      signal: controller.signal
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Hover sample failed with ${response.status}`);
+        }
+        return response.json() as Promise<HoverInfo>;
+      })
+      .then((sample) => {
+        if (requestId === hoverRequestId.current) {
+          setHoverInfo(sample);
+        }
+      })
+      .catch((error) => {
+        if (requestId === hoverRequestId.current && !(error instanceof DOMException && error.name === "AbortError")) {
+          setHoverInfo({ lat: point.lat, lon: point.lon, samples: [] });
+        }
+      });
+  }, [activeBand, selectedIdList]);
+
   const handleHover = useCallback(
     (point: GeoPoint) => {
+      pendingHoverPoint.current = point;
+      if (hoverTimer.current !== null) {
+        return;
+      }
+      const elapsed = window.performance.now() - lastHoverRequestAt.current;
+      const wait = Math.max(0, HOVER_THROTTLE_MS - elapsed);
+      hoverTimer.current = window.setTimeout(flushHover, wait);
+    },
+    [flushHover]
+  );
+
+  useEffect(() => {
+    hoverRequestId.current += 1;
+    pendingHoverPoint.current = null;
+    if (hoverTimer.current !== null) {
+      window.clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+    hoverAbort.current?.abort();
+    hoverAbort.current = null;
+  }, [activeBand, selectedKey]);
+
+  useEffect(() => {
+    return () => {
       if (hoverTimer.current !== null) {
         window.clearTimeout(hoverTimer.current);
       }
-      hoverTimer.current = window.setTimeout(() => {
-        if (!activeBand || selectedIdList.length === 0) {
-          return;
-        }
-        hoverAbort.current?.abort();
-        const controller = new AbortController();
-        hoverAbort.current = controller;
-        fetch("/api/sample-point", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ dataset_ids: selectedIdList, lat: point.lat, lon: point.lon, band: activeBand }),
-          signal: controller.signal
-        })
-          .then((response) => {
-            if (!response.ok) {
-              throw new Error(`Hover sample failed with ${response.status}`);
-            }
-            return response.json() as Promise<HoverInfo>;
-          })
-          .then((sample) => setHoverInfo(sample))
-          .catch((error) => {
-            if (!(error instanceof DOMException && error.name === "AbortError")) {
-              setHoverInfo({ lat: point.lat, lon: point.lon, samples: [] });
-            }
-          });
-      }, 140);
-    },
-    [activeBand, selectedIdList]
-  );
+      hoverAbort.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     if (transects.length === 0 || selectedIdList.length === 0 || !activeBand) {
@@ -506,6 +577,14 @@ export default function App() {
     setViewport(null);
   }
 
+  function updateMapColorSettings(index: number, changes: Partial<MapColorSettings>) {
+    setMapColorSettings((items) =>
+      items.map((settings, itemIndex) =>
+        itemIndex === index ? { ...settings, ...changes } : settings
+      )
+    );
+  }
+
   function finishDraft() {
     if (draftPoints.length < 2) {
       return;
@@ -548,19 +627,62 @@ export default function App() {
       <main className="workspace">
         <aside className="control-panel" aria-label="Display controls">
           <section className="control-section">
-            <h2><Layers size={17} /> Data</h2>
-            {[0, 1, 2].map((index) => (
-              <label key={index} className="field">
-                <span>Map {index + 1}</span>
-                <select value={selectedIds[index] ?? ""} onChange={(event) => updateSelectedId(index, event.target.value)}>
-                  <option value="">None</option>
-                  {datasets.map((dataset) => (
-                    <option key={dataset.id} value={dataset.id}>
-                      {dataset.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <h2><Layers size={17} /> Maps</h2>
+            {MAP_SLOTS.map((index) => (
+              <div key={index} className="map-control-group">
+                <label className="field">
+                  <span>Map {index + 1}</span>
+                  <select value={selectedIds[index] ?? ""} onChange={(event) => updateSelectedId(index, event.target.value)}>
+                    <option value="">None</option>
+                    {datasets.map((dataset) => (
+                      <option key={dataset.id} value={dataset.id}>
+                        {dataset.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Colormap</span>
+                  <select
+                    value={mapColorSettings[index].cmap}
+                    onChange={(event) => updateMapColorSettings(index, { cmap: event.target.value })}
+                  >
+                    {COLORMAPS.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={mapColorSettings[index].autoScale}
+                    onChange={(event) => updateMapColorSettings(index, { autoScale: event.target.checked })}
+                  />
+                  <span>Auto scale</span>
+                </label>
+                <div className="scale-row">
+                  <label className="field compact">
+                    <span>Min</span>
+                    <input
+                      value={mapColorSettings[index].vmin}
+                      onChange={(event) => updateMapColorSettings(index, { vmin: event.target.value })}
+                      disabled={mapColorSettings[index].autoScale}
+                      inputMode="decimal"
+                    />
+                  </label>
+                  <label className="field compact">
+                    <span>Max</span>
+                    <input
+                      value={mapColorSettings[index].vmax}
+                      onChange={(event) => updateMapColorSettings(index, { vmax: event.target.value })}
+                      disabled={mapColorSettings[index].autoScale}
+                      inputMode="decimal"
+                    />
+                  </label>
+                </div>
+              </div>
             ))}
             <label className="field">
               <span>Band</span>
@@ -572,34 +694,6 @@ export default function App() {
                 ))}
               </select>
             </label>
-          </section>
-
-          <section className="control-section">
-            <h2><Palette size={17} /> Color</h2>
-            <label className="field">
-              <span>Colormap</span>
-              <select value={cmap} onChange={(event) => setCmap(event.target.value)}>
-                {COLORMAPS.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="check-row">
-              <input type="checkbox" checked={autoScale} onChange={(event) => setAutoScale(event.target.checked)} />
-              <span>Auto scale</span>
-            </label>
-            <div className="scale-row">
-              <label className="field compact">
-                <span>Min</span>
-                <input value={vmin} onChange={(event) => setVmin(event.target.value)} disabled={autoScale} inputMode="decimal" />
-              </label>
-              <label className="field compact">
-                <span>Max</span>
-                <input value={vmax} onChange={(event) => setVmax(event.target.value)} disabled={autoScale} inputMode="decimal" />
-              </label>
-            </div>
           </section>
 
           <section className="control-section">
@@ -665,24 +759,27 @@ export default function App() {
               <span>Select datasets with at least one shared band.</span>
             </div>
           ) : (
-            selectedDatasets.map((dataset, index) => (
-              <MapPanel
-                key={`${dataset.id}-${index}`}
-                dataset={dataset}
-                band={activeBand}
-                cmap={cmap}
-                autoScale={autoScale}
-                vmin={vmin}
-                vmax={vmax}
-                viewport={viewport}
-                drawing={drawing}
-                transects={transects}
-                draftPoints={draftPoints}
-                onViewportChange={setViewport}
-                onHover={handleHover}
-                onAddDraftPoint={(point) => setDraftPoints((items) => [...items, point])}
-              />
-            ))
+            selectedMapSlots.map(({ dataset, slotIndex }) => {
+              const colorSettings = mapColorSettings[slotIndex];
+              return (
+                <MapPanel
+                  key={`${dataset.id}-${slotIndex}`}
+                  dataset={dataset}
+                  band={activeBand}
+                  cmap={colorSettings.cmap}
+                  autoScale={colorSettings.autoScale}
+                  vmin={colorSettings.vmin}
+                  vmax={colorSettings.vmax}
+                  viewport={viewport}
+                  drawing={drawing}
+                  transects={transects}
+                  draftPoints={draftPoints}
+                  onViewportChange={setViewport}
+                  onHover={handleHover}
+                  onAddDraftPoint={(point) => setDraftPoints((items) => [...items, point])}
+                />
+              );
+            })
           )}
         </section>
 

@@ -30,6 +30,20 @@ def write_fixture(path: Path, offset: float = 0.0) -> None:
         h5.attrs["pair"] = "20200101_20200201"
 
 
+def write_top_level_band_fixture(path: Path) -> None:
+    rows, cols = 12, 16
+    lat = np.linspace(35.0, 34.0, rows)
+    lon = np.linspace(-118.0, -117.0, cols)
+    yy, xx = np.meshgrid(np.linspace(0, 1, rows), np.linspace(0, 1, cols), indexing="ij")
+
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset("wrapped phase", data=np.angle(np.exp(1j * (yy + xx))).astype(np.float32))
+        h5.create_dataset("unwrapped phase", data=(yy * 8.0 + xx).astype(np.float32))
+        h5.create_dataset("coherence", data=np.clip(0.3 + xx, 0, 1).astype(np.float32))
+        h5.create_dataset("lat", data=lat)
+        h5.create_dataset("lon", data=lon)
+
+
 def test_dataset_discovery_and_summary(tmp_path: Path) -> None:
     write_fixture(tmp_path / "igram_a.h5")
     store = DatasetStore(tmp_path)
@@ -85,3 +99,22 @@ def test_transect_samples_multiple_datasets(tmp_path: Path) -> None:
     assert len(result["profiles"]) == 2
     assert len(result["profiles"][0]["values"]) == 40
     assert result["profiles"][1]["values"][20] > result["profiles"][0]["values"][20]
+
+
+def test_top_level_2d_band_layout(tmp_path: Path) -> None:
+    write_top_level_band_fixture(tmp_path / "gorka_style.h5")
+    store = DatasetStore(tmp_path)
+
+    summary = store.summary("gorka_style")
+    sample = store.sample_point("gorka_style", lat=34.5, lon=-117.5, active_band="unwrapped phase")
+    transect = store.transect(
+        ["gorka_style"],
+        "unwrapped phase",
+        [(34.95, -117.95), (34.05, -117.05)],
+        samples=16,
+    )
+
+    assert [band.name for band in summary.bands] == ["wrapped phase", "unwrapped phase", "coherence"]
+    assert summary.shape.rows == 12
+    assert sample["active_value"] is not None
+    assert len(transect["profiles"][0]["values"]) == 16

@@ -44,6 +44,7 @@ class SamplePointRequest(BaseModel):
     lat: float
     lon: float
     band: str | None = None
+    include_all_values: bool = True
 
 
 class DatasetPointSample(BaseModel):
