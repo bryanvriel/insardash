@@ -9,11 +9,20 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .hdf5_store import DatasetError, DatasetStore
-from .schemas import SamplePointRequest, SamplePointResponse, TransectRequest, TransectResponse
+from .schemas import MapSelection, SamplePointRequest, SamplePointResponse, TransectRequest, TransectResponse
+from .value_transform import TransformError
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = ROOT / "data"
+
+
+def _request_maps(dataset_ids: list[str] | None, maps: list[MapSelection] | None) -> list[MapSelection]:
+    if maps is not None:
+        return maps
+    if dataset_ids is not None:
+        return [MapSelection(dataset_id=dataset_id) for dataset_id in dataset_ids]
+    raise HTTPException(status_code=422, detail="Request must include maps or dataset_ids")
 
 
 def create_app(data_dir: Path | None = None) -> FastAPI:
@@ -47,11 +56,14 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         vmin: float | None = Query(default=None),
         vmax: float | None = Query(default=None),
         max_size: int = Query(default=1200, ge=64, le=4096),
+        transform: str | None = Query(default=None),
     ) -> Response:
         try:
-            png = store.preview_png(dataset_id, band=band, cmap=cmap, vmin=vmin, vmax=vmax, max_size=max_size)
+            png = store.preview_png(dataset_id, band=band, cmap=cmap, vmin=vmin, vmax=vmax, max_size=max_size, transform=transform)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except TransformError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except DatasetError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return Response(content=png, media_type="image/png", headers={"Cache-Control": "public, max-age=30"})
@@ -59,30 +71,39 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.post("/api/sample-point", response_model=SamplePointResponse)
     def sample_point(request: SamplePointRequest):
         try:
+            maps = _request_maps(request.dataset_ids, request.maps)
             samples = [
                 store.sample_point(
-                    dataset_id,
+                    map_selection.dataset_id,
                     request.lat,
                     request.lon,
                     request.band,
                     include_all_values=request.include_all_values,
+                    transform=map_selection.transform,
                 )
-                for dataset_id in request.dataset_ids
+                for map_selection in maps
             ]
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except DatasetError as exc:
+        except (DatasetError, TransformError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"lat": request.lat, "lon": request.lon, "samples": samples}
 
     @app.post("/api/transect", response_model=TransectResponse)
     def transect(request: TransectRequest):
         try:
+            maps = _request_maps(request.dataset_ids, request.maps)
             points = [(point.lat, point.lon) for point in request.points]
-            return store.transect(request.dataset_ids, request.band, points, request.samples)
+            return store.transect(
+                [map_selection.dataset_id for map_selection in maps],
+                request.band,
+                points,
+                request.samples,
+                transforms=[map_selection.transform for map_selection in maps],
+            )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except (DatasetError, ValueError) as exc:
+        except (DatasetError, TransformError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     frontend_dist = ROOT / "frontend" / "dist"

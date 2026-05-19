@@ -64,11 +64,17 @@ type MapColorSettings = {
   autoScale: boolean;
   vmin: string;
   vmax: string;
+  transform: string;
 };
 
 type SelectedMapSlot = {
   slotIndex: number;
   dataset: DatasetSummary;
+};
+
+type MapRequest = {
+  dataset_id: string;
+  transform?: string;
 };
 
 type PointSample = {
@@ -79,6 +85,7 @@ type PointSample = {
   col?: number | null;
   active_band?: string | null;
   active_value?: number | null;
+  transform?: string | null;
   values: Record<string, number | null>;
   units: Record<string, string | null>;
 };
@@ -99,6 +106,7 @@ type TransectResponse = {
     title: string;
     band: string;
     units: string | null;
+    transform?: string | null;
     values: Array<number | null>;
   }>;
 };
@@ -122,7 +130,8 @@ function defaultMapColorSettings(): MapColorSettings {
     cmap: "viridis",
     autoScale: true,
     vmin: "",
-    vmax: ""
+    vmax: "",
+    transform: ""
   };
 }
 
@@ -150,13 +159,21 @@ function centerOfBounds(bounds: Bounds): [number, number] {
   return [(bounds.south + bounds.north) / 2, (bounds.west + bounds.east) / 2];
 }
 
-function makePreviewUrl(datasetId: string, band: string, cmap: string, autoScale: boolean, vmin: string, vmax: string) {
+function normalizeTransform(transform: string) {
+  return transform.trim();
+}
+
+function makePreviewUrl(datasetId: string, band: string, cmap: string, autoScale: boolean, vmin: string, vmax: string, transform: string) {
   const params = new URLSearchParams({ band, cmap, max_size: "1400" });
   if (!autoScale && vmin.trim() !== "") {
     params.set("vmin", vmin.trim());
   }
   if (!autoScale && vmax.trim() !== "") {
     params.set("vmax", vmax.trim());
+  }
+  const normalizedTransform = normalizeTransform(transform);
+  if (normalizedTransform) {
+    params.set("transform", normalizedTransform);
   }
   return `/api/datasets/${encodeURIComponent(datasetId)}/preview?${params.toString()}`;
 }
@@ -234,6 +251,7 @@ function MapPanel({
   autoScale,
   vmin,
   vmax,
+  transform,
   viewport,
   drawing,
   transects,
@@ -248,6 +266,7 @@ function MapPanel({
   autoScale: boolean;
   vmin: string;
   vmax: string;
+  transform: string;
   viewport: Viewport | null;
   drawing: boolean;
   transects: Transect[];
@@ -257,8 +276,8 @@ function MapPanel({
   onAddDraftPoint: (point: GeoPoint) => void;
 }) {
   const previewUrl = useMemo(
-    () => makePreviewUrl(dataset.id, band, cmap, autoScale, vmin, vmax),
-    [autoScale, band, cmap, dataset.id, vmax, vmin]
+    () => makePreviewUrl(dataset.id, band, cmap, autoScale, vmin, vmax, transform),
+    [autoScale, band, cmap, dataset.id, transform, vmax, vmin]
   );
   const mapBounds = boundsExpression(dataset.bounds);
   const initialCenter = centerOfBounds(dataset.bounds);
@@ -334,19 +353,22 @@ function ProfilePlot({
     if (!response) {
       return [];
     }
-    return response.profiles.map((profile, index) => ({
-      x: response.distance_km,
-      y: profile.values,
-      mode: "lines",
-      type: "scatter",
-      name: `${transect.name} - ${profile.title}`,
-      line: {
-        color: transect.color,
-        width: index === 0 ? 3 : 2,
-        dash: index === 0 ? "solid" : index === 1 ? "dash" : "dot"
-      },
-      hovertemplate: "Distance %{x:.2f} km<br>Value %{y:.3f}<extra>%{fullData.name}</extra>"
-    }));
+    return response.profiles.map((profile, index) => {
+      const transformLabel = profile.transform ? ` (${profile.transform})` : "";
+      return {
+        x: response.distance_km,
+        y: profile.values,
+        mode: "lines",
+        type: "scatter",
+        name: `${transect.name} - ${profile.title}${transformLabel}`,
+        line: {
+          color: transect.color,
+          width: index === 0 ? 3 : 2,
+          dash: index === 0 ? "solid" : index === 1 ? "dash" : "dot"
+        },
+        hovertemplate: "Distance %{x:.2f} km<br>Value %{y:.3f}<extra>%{fullData.name}</extra>"
+      };
+    });
   });
 
   if (traces.length === 0) {
@@ -470,8 +492,18 @@ export default function App() {
   );
 
   const selectedDatasets = useMemo(() => selectedMapSlots.map((slot) => slot.dataset), [selectedMapSlots]);
-  const selectedIdList = useMemo(() => selectedMapSlots.map((slot) => slot.dataset.id), [selectedMapSlots]);
-  const selectedKey = selectedIdList.join("|");
+  const mapTransformKey = mapColorSettings.map((settings) => normalizeTransform(settings.transform)).join("|");
+  const selectedMapRequests = useMemo<MapRequest[]>(
+    () =>
+      selectedMapSlots.map(({ dataset, slotIndex }) => {
+        const transform = normalizeTransform(mapColorSettings[slotIndex].transform);
+        return transform ? { dataset_id: dataset.id, transform } : { dataset_id: dataset.id };
+      }),
+    [mapTransformKey, selectedMapSlots]
+  );
+  const selectedMapKey = selectedMapRequests
+    .map((request) => `${request.dataset_id}:${request.transform ?? ""}`)
+    .join("|");
 
   const availableBands = useMemo(() => {
     if (selectedDatasets.length === 0) {
@@ -496,7 +528,7 @@ export default function App() {
     hoverTimer.current = null;
     const point = pendingHoverPoint.current;
     pendingHoverPoint.current = null;
-    if (!point || !activeBand || selectedIdList.length === 0) {
+    if (!point || !activeBand || selectedMapRequests.length === 0) {
       return;
     }
 
@@ -510,7 +542,7 @@ export default function App() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        dataset_ids: selectedIdList,
+        maps: selectedMapRequests,
         lat: point.lat,
         lon: point.lon,
         band: activeBand,
@@ -534,7 +566,7 @@ export default function App() {
           setHoverInfo({ lat: point.lat, lon: point.lon, samples: [] });
         }
       });
-  }, [activeBand, selectedIdList]);
+  }, [activeBand, selectedMapRequests]);
 
   const handleHover = useCallback(
     (point: GeoPoint) => {
@@ -558,7 +590,7 @@ export default function App() {
     }
     hoverAbort.current?.abort();
     hoverAbort.current = null;
-  }, [activeBand, selectedKey]);
+  }, [activeBand, selectedMapKey]);
 
   useEffect(() => {
     return () => {
@@ -586,7 +618,7 @@ export default function App() {
   }, [profileHeightPx]);
 
   useEffect(() => {
-    if (transects.length === 0 || selectedIdList.length === 0 || !activeBand) {
+    if (transects.length === 0 || selectedMapRequests.length === 0 || !activeBand) {
       setProfileResponses({});
       return;
     }
@@ -598,7 +630,7 @@ export default function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            dataset_ids: selectedIdList,
+            maps: selectedMapRequests,
             band: activeBand,
             points: transect.points,
             samples: 256
@@ -626,7 +658,7 @@ export default function App() {
         }
       });
     return () => controller.abort();
-  }, [activeBand, selectedIdList, selectedKey, transects]);
+  }, [activeBand, selectedMapKey, selectedMapRequests, transects]);
 
   function updateSelectedId(index: number, value: string) {
     const next = [...selectedIds];
@@ -774,6 +806,15 @@ export default function App() {
                     ))}
                   </select>
                 </label>
+                <label className="field">
+                  <span>Transform</span>
+                  <input
+                    value={mapColorSettings[index].transform}
+                    onChange={(event) => updateMapColorSettings(index, { transform: event.target.value })}
+                    placeholder="np.abs(x)"
+                    spellCheck={false}
+                  />
+                </label>
                 <label className="check-row">
                   <input
                     type="checkbox"
@@ -890,6 +931,7 @@ export default function App() {
                   autoScale={colorSettings.autoScale}
                   vmin={colorSettings.vmin}
                   vmax={colorSettings.vmax}
+                  transform={colorSettings.transform}
                   viewport={viewport}
                   drawing={drawing}
                   transects={transects}
@@ -912,9 +954,9 @@ export default function App() {
                 <span>{formatCoord(hoverInfo.lon)}</span>
               </div>
               <div className="sample-list">
-                {hoverInfo.samples.map((sample) => (
-                  <div key={sample.dataset_id} className="sample-row">
-                    <strong>{sample.title}</strong>
+                {hoverInfo.samples.map((sample, index) => (
+                  <div key={`${sample.dataset_id}:${index}`} className="sample-row">
+                    <strong>{sample.transform ? `${sample.title} (${sample.transform})` : sample.title}</strong>
                     <span>{sample.in_bounds ? formatValue(sample.active_value, sample.units[activeBand]) : "Outside raster"}</span>
                   </div>
                 ))}

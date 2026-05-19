@@ -4,8 +4,10 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 
 from backend.hdf5_store import DatasetStore
+from backend.value_transform import TransformError
 
 
 def write_fixture(path: Path, offset: float = 0.0) -> None:
@@ -68,6 +70,17 @@ def test_preview_png_is_generated(tmp_path: Path) -> None:
     assert len(png) > 100
 
 
+def test_preview_png_applies_transform(tmp_path: Path) -> None:
+    write_fixture(tmp_path / "igram_a.h5")
+    store = DatasetStore(tmp_path)
+
+    raw = store.preview_png("igram_a", "unwrapped_phase", cmap="viridis", max_size=64)
+    transformed = store.preview_png("igram_a", "unwrapped_phase", cmap="viridis", max_size=64, transform="np.cos(x)")
+
+    assert transformed.startswith(b"\x89PNG")
+    assert transformed != raw
+
+
 def test_sample_point_and_out_of_bounds(tmp_path: Path) -> None:
     write_fixture(tmp_path / "igram_a.h5")
     store = DatasetStore(tmp_path)
@@ -80,6 +93,24 @@ def test_sample_point_and_out_of_bounds(tmp_path: Path) -> None:
     assert sample["active_value"] is not None
     assert sample["values"]["coherence"] is not None
     assert outside["in_bounds"] is False
+
+
+def test_sample_point_applies_transform(tmp_path: Path) -> None:
+    write_fixture(tmp_path / "igram_a.h5")
+    store = DatasetStore(tmp_path)
+
+    raw = store.sample_point("igram_a", lat=34.5, lon=-117.5, active_band="unwrapped_phase", include_all_values=False)
+    transformed = store.sample_point(
+        "igram_a",
+        lat=34.5,
+        lon=-117.5,
+        active_band="unwrapped_phase",
+        include_all_values=False,
+        transform="np.cos(x)",
+    )
+
+    assert transformed["transform"] == "np.cos(x)"
+    assert np.isclose(transformed["active_value"], np.cos(raw["active_value"]))
 
 
 def test_transect_samples_multiple_datasets(tmp_path: Path) -> None:
@@ -99,6 +130,38 @@ def test_transect_samples_multiple_datasets(tmp_path: Path) -> None:
     assert len(result["profiles"]) == 2
     assert len(result["profiles"][0]["values"]) == 40
     assert result["profiles"][1]["values"][20] > result["profiles"][0]["values"][20]
+
+
+def test_transect_applies_per_dataset_transforms(tmp_path: Path) -> None:
+    write_fixture(tmp_path / "igram_a.h5")
+    store = DatasetStore(tmp_path)
+
+    raw = store.transect(
+        ["igram_a"],
+        "unwrapped_phase",
+        [(34.95, -117.95), (34.05, -117.05)],
+        samples=16,
+    )
+    transformed = store.transect(
+        ["igram_a"],
+        "unwrapped_phase",
+        [(34.95, -117.95), (34.05, -117.05)],
+        samples=16,
+        transforms=["x + 1"],
+    )
+
+    assert transformed["profiles"][0]["transform"] == "x + 1"
+    for raw_value, transformed_value in zip(raw["profiles"][0]["values"], transformed["profiles"][0]["values"]):
+        if raw_value is not None:
+            assert np.isclose(transformed_value, raw_value + 1)
+
+
+def test_invalid_transform_is_rejected(tmp_path: Path) -> None:
+    write_fixture(tmp_path / "igram_a.h5")
+    store = DatasetStore(tmp_path)
+
+    with pytest.raises(TransformError):
+        store.preview_png("igram_a", "unwrapped_phase", transform="open('/tmp/nope')")
 
 
 def test_top_level_2d_band_layout(tmp_path: Path) -> None:

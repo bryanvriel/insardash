@@ -39,8 +39,14 @@ class GeoPoint(BaseModel):
     lon: float
 
 
+class MapSelection(BaseModel):
+    dataset_id: str
+    transform: str | None = None
+
+
 class SamplePointRequest(BaseModel):
-    dataset_ids: list[str] = Field(min_length=1, max_length=3)
+    dataset_ids: list[str] | None = Field(default=None, min_length=1, max_length=3)
+    maps: list[MapSelection] | None = Field(default=None, min_length=1, max_length=3)
     lat: float
     lon: float
     band: str | None = None
@@ -55,6 +61,7 @@ class DatasetPointSample(BaseModel):
     col: int | None = None
     active_band: str | None = None
     active_value: float | None = None
+    transform: str | None = None
     values: dict[str, float | None] = Field(default_factory=dict)
     units: dict[str, str | None] = Field(default_factory=dict)
 
@@ -66,7 +73,8 @@ class SamplePointResponse(BaseModel):
 
 
 class TransectRequest(BaseModel):
-    dataset_ids: list[str] = Field(min_length=1, max_length=3)
+    dataset_ids: list[str] | None = Field(default=None, min_length=1, max_length=3)
+    maps: list[MapSelection] | None = Field(default=None, min_length=1, max_length=3)
     band: str
     points: list[GeoPoint] = Field(min_length=2)
     samples: int = Field(default=256, ge=2, le=4096)
@@ -77,6 +85,7 @@ class TransectProfile(BaseModel):
     title: str
     band: str
     units: str | None = None
+    transform: str | None = None
     values: list[float | None]
 
 

@@ -17,6 +17,7 @@ from PIL import Image
 from scipy.ndimage import map_coordinates
 
 from .schemas import BandInfo, Bounds, DatasetSummary, RasterShape
+from .value_transform import compile_transform
 
 
 HDF5_SUFFIXES = {".h5", ".hdf5"}
@@ -188,9 +189,11 @@ class DatasetStore:
         vmin: float | None = None,
         vmax: float | None = None,
         max_size: int = 1200,
+        transform: str | None = None,
     ) -> bytes:
+        value_transform = compile_transform(transform)
         ref = self._get_ref(dataset_id)
-        cache_key = (dataset_id, ref.mtime_ns, ref.size, band, cmap, vmin, vmax, max_size)
+        cache_key = (dataset_id, ref.mtime_ns, ref.size, band, cmap, vmin, vmax, max_size, value_transform.expression)
         cached = self._preview_cache.get(cache_key)
         if cached is not None:
             return cached
@@ -198,7 +201,7 @@ class DatasetStore:
         with h5py.File(ref.path, "r") as h5:
             layout = self._read_layout(h5)
             axes = self._read_axes(h5, layout.rows, layout.cols)
-            array = layout.read_band(band)
+            array = np.asarray(value_transform.apply(layout.read_band(band)), dtype=np.float64)
 
         display = self._orient_for_display(array, axes)
         stride = max(1, math.ceil(max(display.shape) / max_size))
@@ -218,7 +221,9 @@ class DatasetStore:
         lon: float,
         active_band: str | None = None,
         include_all_values: bool = True,
+        transform: str | None = None,
     ) -> dict[str, Any]:
+        value_transform = compile_transform(transform)
         ref = self._get_ref(dataset_id)
         with h5py.File(ref.path, "r") as h5:
             layout = self._read_layout(h5)
@@ -231,6 +236,7 @@ class DatasetStore:
                     "title": summary.title,
                     "in_bounds": False,
                     "active_band": active_band,
+                    "transform": value_transform.expression or None,
                     "values": {},
                     "units": {band.name: band.units for band in summary.bands},
                 }
@@ -243,13 +249,13 @@ class DatasetStore:
             if include_all_values:
                 raw_values = layout.read_pixel_values(row, col)
                 values = {
-                    band.name: _finite_or_none(float(raw_values[band.index]))
+                    band.name: _finite_or_none(value_transform.apply_scalar(float(raw_values[band.index])))
                     for band in summary.bands
                 }
             else:
                 values = {}
                 if active_band is not None and active_band in units:
-                    values[active_band] = _finite_or_none(layout.read_pixel_value(active_band, row, col))
+                    values[active_band] = _finite_or_none(value_transform.apply_scalar(layout.read_pixel_value(active_band, row, col)))
             chosen_band = active_band if active_band in values else None
             return {
                 "dataset_id": dataset_id,
@@ -259,6 +265,7 @@ class DatasetStore:
                 "col": col,
                 "active_band": chosen_band,
                 "active_value": values.get(chosen_band) if chosen_band else None,
+                "transform": value_transform.expression or None,
                 "values": values,
                 "units": units,
             }
@@ -269,16 +276,21 @@ class DatasetStore:
         band: str,
         points: list[tuple[float, float]],
         samples: int,
+        transforms: list[str | None] | None = None,
     ) -> dict[str, Any]:
         lats, lons, distance_km = self._interpolate_polyline(points, samples)
         profiles: list[dict[str, Any]] = []
-        for dataset_id in dataset_ids:
+        transforms = transforms or [None] * len(dataset_ids)
+        if len(transforms) != len(dataset_ids):
+            raise ValueError("Transect transforms length must match dataset_ids length")
+        for dataset_id, transform in zip(dataset_ids, transforms):
+            value_transform = compile_transform(transform)
             ref = self._get_ref(dataset_id)
             with h5py.File(ref.path, "r") as h5:
                 layout = self._read_layout(h5)
                 axes = self._read_axes(h5, layout.rows, layout.cols)
                 rows, cols, in_bounds = self._latlon_arrays_to_indices(axes, lats, lons)
-                raster = layout.read_band(band)
+                raster = np.asarray(value_transform.apply(layout.read_band(band)), dtype=np.float64)
                 values = map_coordinates(
                     raster,
                     np.vstack([rows, cols]),
@@ -295,6 +307,7 @@ class DatasetStore:
                         "title": summary.title,
                         "band": band,
                         "units": band_info.units,
+                        "transform": value_transform.expression or None,
                         "values": [_finite_or_none(float(value)) for value in values],
                     }
                 )
