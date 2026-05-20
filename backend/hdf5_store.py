@@ -273,24 +273,31 @@ class DatasetStore:
     def transect(
         self,
         dataset_ids: list[str],
-        band: str,
+        band: str | None,
         points: list[tuple[float, float]],
         samples: int,
         transforms: list[str | None] | None = None,
+        bands: list[str | None] | None = None,
     ) -> dict[str, Any]:
         lats, lons, distance_km = self._interpolate_polyline(points, samples)
         profiles: list[dict[str, Any]] = []
         transforms = transforms or [None] * len(dataset_ids)
         if len(transforms) != len(dataset_ids):
             raise ValueError("Transect transforms length must match dataset_ids length")
-        for dataset_id, transform in zip(dataset_ids, transforms):
+        bands = bands or [band] * len(dataset_ids)
+        if len(bands) != len(dataset_ids):
+            raise ValueError("Transect bands length must match dataset_ids length")
+        resolved_bands = [item for item in bands if item is not None]
+        if len(resolved_bands) != len(dataset_ids):
+            raise ValueError("Each transect map requires a band")
+        for dataset_id, band_name, transform in zip(dataset_ids, resolved_bands, transforms):
             value_transform = compile_transform(transform)
             ref = self._get_ref(dataset_id)
             with h5py.File(ref.path, "r") as h5:
                 layout = self._read_layout(h5)
                 axes = self._read_axes(h5, layout.rows, layout.cols)
                 rows, cols, in_bounds = self._latlon_arrays_to_indices(axes, lats, lons)
-                raster = np.asarray(value_transform.apply(layout.read_band(band)), dtype=np.float64)
+                raster = np.asarray(value_transform.apply(layout.read_band(band_name)), dtype=np.float64)
                 values = map_coordinates(
                     raster,
                     np.vstack([rows, cols]),
@@ -300,12 +307,12 @@ class DatasetStore:
                 )
                 values = np.where(in_bounds, values, np.nan)
                 summary = self.summary(dataset_id)
-                band_info = next(item for item in summary.bands if item.name == band)
+                band_info = next(item for item in summary.bands if item.name == band_name)
                 profiles.append(
                     {
                         "dataset_id": dataset_id,
                         "title": summary.title,
-                        "band": band,
+                        "band": band_name,
                         "units": band_info.units,
                         "transform": value_transform.expression or None,
                         "values": [_finite_or_none(float(value)) for value in values],
@@ -313,7 +320,7 @@ class DatasetStore:
                 )
 
         return {
-            "band": band,
+            "band": resolved_bands[0] if len(set(resolved_bands)) == 1 else "mixed",
             "distance_km": [float(value) for value in distance_km],
             "lat": [float(value) for value in lats],
             "lon": [float(value) for value in lons],

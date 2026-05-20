@@ -132,6 +132,26 @@ def test_transect_samples_multiple_datasets(tmp_path: Path) -> None:
     assert result["profiles"][1]["values"][20] > result["profiles"][0]["values"][20]
 
 
+def test_transect_samples_mixed_bands(tmp_path: Path) -> None:
+    write_fixture(tmp_path / "igram_a.h5")
+    store = DatasetStore(tmp_path)
+
+    result = store.transect(
+        ["igram_a", "igram_a"],
+        None,
+        [(34.95, -117.95), (34.05, -117.05)],
+        samples=16,
+        bands=["unwrapped_phase", "coherence"],
+    )
+
+    assert result["band"] == "mixed"
+    assert [profile["band"] for profile in result["profiles"]] == ["unwrapped_phase", "coherence"]
+    assert result["profiles"][0]["units"] == "rad"
+    assert result["profiles"][1]["units"] == "1"
+    assert len(result["profiles"][0]["values"]) == 16
+    assert len(result["profiles"][1]["values"]) == 16
+
+
 def test_transect_applies_per_dataset_transforms(tmp_path: Path) -> None:
     write_fixture(tmp_path / "igram_a.h5")
     store = DatasetStore(tmp_path)

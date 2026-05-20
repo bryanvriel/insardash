@@ -60,6 +60,7 @@ type Transect = {
 };
 
 type MapColorSettings = {
+  band: string;
   cmap: string;
   autoScale: boolean;
   vmin: string;
@@ -74,6 +75,7 @@ type SelectedMapSlot = {
 
 type MapRequest = {
   dataset_id: string;
+  band: string;
   transform?: string;
 };
 
@@ -127,6 +129,7 @@ const PlotComponent = Plot as any;
 
 function defaultMapColorSettings(): MapColorSettings {
   return {
+    band: "",
     cmap: "viridis",
     autoScale: true,
     vmin: "",
@@ -341,12 +344,10 @@ function MapPanel({
 
 function ProfilePlot({
   transects,
-  responses,
-  activeBand
+  responses
 }: {
   transects: Transect[];
   responses: Record<string, TransectResponse>;
-  activeBand: string;
 }) {
   const traces = transects.flatMap((transect) => {
     const response = responses[transect.id];
@@ -354,19 +355,20 @@ function ProfilePlot({
       return [];
     }
     return response.profiles.map((profile, index) => {
+      const bandLabel = profile.units ? `${profile.band} (${profile.units})` : profile.band;
       const transformLabel = profile.transform ? ` (${profile.transform})` : "";
       return {
         x: response.distance_km,
         y: profile.values,
         mode: "lines",
         type: "scatter",
-        name: `${transect.name} - ${profile.title}${transformLabel}`,
+        name: `${transect.name} - ${profile.title} - ${bandLabel}${transformLabel}`,
         line: {
           color: transect.color,
           width: index === 0 ? 3 : 2,
           dash: index === 0 ? "solid" : index === 1 ? "dash" : "dot"
         },
-        hovertemplate: "Distance %{x:.2f} km<br>Value %{y:.3f}<extra>%{fullData.name}</extra>"
+        hovertemplate: `Distance %{x:.2f} km<br>${bandLabel}: %{y:.3f}<extra>%{fullData.name}</extra>`
       };
     });
   });
@@ -389,7 +391,7 @@ function ProfilePlot({
         paper_bgcolor: "rgba(0,0,0,0)",
         plot_bgcolor: "#ffffff",
         xaxis: { title: "Distance (km)", zeroline: false, gridcolor: "#e6e8ee" },
-        yaxis: { title: activeBand, zeroline: false, gridcolor: "#e6e8ee" },
+        yaxis: { title: "Value", zeroline: false, gridcolor: "#e6e8ee" },
         legend: { orientation: "h", y: -0.26 },
         font: { family: "Inter, ui-sans-serif, system-ui, sans-serif", size: 12, color: "#1f2937" }
       }}
@@ -403,7 +405,6 @@ function ProfilePlot({
 export default function App() {
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
   const [selectedIds, setSelectedIds] = useState<Array<string | null>>([null, null, null]);
-  const [activeBand, setActiveBand] = useState("");
   const [mapColorSettings, setMapColorSettings] = useState<MapColorSettings[]>(() => MAP_SLOTS.map(() => defaultMapColorSettings()));
   const [profileHeightPx, setProfileHeightPx] = useState(DEFAULT_PROFILE_HEIGHT_PX);
   const [isProfileResizing, setIsProfileResizing] = useState(false);
@@ -492,43 +493,42 @@ export default function App() {
   );
 
   const selectedDatasets = useMemo(() => selectedMapSlots.map((slot) => slot.dataset), [selectedMapSlots]);
+  useEffect(() => {
+    setMapColorSettings((items) =>
+      items.map((settings, index) => {
+        const dataset = datasets.find((item) => item.id === selectedIds[index]);
+        if (!dataset) {
+          return settings.band ? { ...settings, band: "" } : settings;
+        }
+        if (dataset.bands.some((band) => band.name === settings.band)) {
+          return settings;
+        }
+        return { ...settings, band: dataset.bands[0]?.name ?? "" };
+      })
+    );
+  }, [datasets, selectedIds]);
+
+  const mapBandKey = mapColorSettings.map((settings) => settings.band).join("|");
   const mapTransformKey = mapColorSettings.map((settings) => normalizeTransform(settings.transform)).join("|");
   const selectedMapRequests = useMemo<MapRequest[]>(
     () =>
       selectedMapSlots.map(({ dataset, slotIndex }) => {
+        const band = mapColorSettings[slotIndex].band;
         const transform = normalizeTransform(mapColorSettings[slotIndex].transform);
-        return transform ? { dataset_id: dataset.id, transform } : { dataset_id: dataset.id };
+        return transform ? { dataset_id: dataset.id, band, transform } : { dataset_id: dataset.id, band };
       }),
-    [mapTransformKey, selectedMapSlots]
+    [mapBandKey, mapTransformKey, selectedMapSlots]
   );
   const selectedMapKey = selectedMapRequests
-    .map((request) => `${request.dataset_id}:${request.transform ?? ""}`)
+    .map((request) => `${request.dataset_id}:${request.band}:${request.transform ?? ""}`)
     .join("|");
-
-  const availableBands = useMemo(() => {
-    if (selectedDatasets.length === 0) {
-      return [];
-    }
-    return selectedDatasets[0].bands.filter((band) =>
-      selectedDatasets.every((dataset) => dataset.bands.some((candidate) => candidate.name === band.name))
-    );
-  }, [selectedDatasets]);
-
-  useEffect(() => {
-    if (availableBands.length === 0) {
-      setActiveBand("");
-      return;
-    }
-    if (!availableBands.some((band) => band.name === activeBand)) {
-      setActiveBand(availableBands[0].name);
-    }
-  }, [activeBand, availableBands]);
+  const selectedMapsHaveBands = selectedMapRequests.every((request) => Boolean(request.band));
 
   const flushHover = useCallback(() => {
     hoverTimer.current = null;
     const point = pendingHoverPoint.current;
     pendingHoverPoint.current = null;
-    if (!point || !activeBand || selectedMapRequests.length === 0) {
+    if (!point || selectedMapRequests.length === 0 || !selectedMapsHaveBands) {
       return;
     }
 
@@ -545,7 +545,6 @@ export default function App() {
         maps: selectedMapRequests,
         lat: point.lat,
         lon: point.lon,
-        band: activeBand,
         include_all_values: false
       }),
       signal: controller.signal
@@ -566,7 +565,7 @@ export default function App() {
           setHoverInfo({ lat: point.lat, lon: point.lon, samples: [] });
         }
       });
-  }, [activeBand, selectedMapRequests]);
+  }, [selectedMapRequests, selectedMapsHaveBands]);
 
   const handleHover = useCallback(
     (point: GeoPoint) => {
@@ -590,7 +589,7 @@ export default function App() {
     }
     hoverAbort.current?.abort();
     hoverAbort.current = null;
-  }, [activeBand, selectedMapKey]);
+  }, [selectedMapKey]);
 
   useEffect(() => {
     return () => {
@@ -618,7 +617,7 @@ export default function App() {
   }, [profileHeightPx]);
 
   useEffect(() => {
-    if (transects.length === 0 || selectedMapRequests.length === 0 || !activeBand) {
+    if (transects.length === 0 || selectedMapRequests.length === 0 || !selectedMapsHaveBands) {
       setProfileResponses({});
       return;
     }
@@ -631,7 +630,6 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             maps: selectedMapRequests,
-            band: activeBand,
             points: transect.points,
             samples: 256
           }),
@@ -658,7 +656,7 @@ export default function App() {
         }
       });
     return () => controller.abort();
-  }, [activeBand, selectedMapKey, selectedMapRequests, transects]);
+  }, [selectedMapKey, selectedMapRequests, selectedMapsHaveBands, transects]);
 
   function updateSelectedId(index: number, value: string) {
     const next = [...selectedIds];
@@ -780,81 +778,89 @@ export default function App() {
         <aside className="control-panel" aria-label="Display controls">
           <section className="control-section">
             <h2><Layers size={17} /> Maps</h2>
-            {MAP_SLOTS.map((index) => (
-              <div key={index} className="map-control-group">
-                <label className="field">
-                  <span>Map {index + 1}</span>
-                  <select value={selectedIds[index] ?? ""} onChange={(event) => updateSelectedId(index, event.target.value)}>
-                    <option value="">None</option>
-                    {datasets.map((dataset) => (
-                      <option key={dataset.id} value={dataset.id}>
-                        {dataset.title}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Colormap</span>
-                  <select
-                    value={mapColorSettings[index].cmap}
-                    onChange={(event) => updateMapColorSettings(index, { cmap: event.target.value })}
-                  >
-                    {COLORMAPS.map((name) => (
-                      <option key={name} value={name}>
-                        {name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Transform</span>
-                  <input
-                    value={mapColorSettings[index].transform}
-                    onChange={(event) => updateMapColorSettings(index, { transform: event.target.value })}
-                    placeholder="np.abs(x)"
-                    spellCheck={false}
-                  />
-                </label>
-                <label className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={mapColorSettings[index].autoScale}
-                    onChange={(event) => updateMapColorSettings(index, { autoScale: event.target.checked })}
-                  />
-                  <span>Auto scale</span>
-                </label>
-                <div className="scale-row">
-                  <label className="field compact">
-                    <span>Min</span>
+            {MAP_SLOTS.map((index) => {
+              const selectedDataset = datasets.find((dataset) => dataset.id === selectedIds[index]);
+              const bandOptions = selectedDataset?.bands ?? [];
+              return (
+                <div key={index} className="map-control-group">
+                  <label className="field">
+                    <span>Map {index + 1}</span>
+                    <select value={selectedIds[index] ?? ""} onChange={(event) => updateSelectedId(index, event.target.value)}>
+                      <option value="">None</option>
+                      {datasets.map((dataset) => (
+                        <option key={dataset.id} value={dataset.id}>
+                          {dataset.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Band</span>
+                    <select
+                      value={mapColorSettings[index].band}
+                      onChange={(event) => updateMapColorSettings(index, { band: event.target.value })}
+                      disabled={!selectedDataset || bandOptions.length === 0}
+                    >
+                      {bandOptions.map((band) => (
+                        <option key={band.name} value={band.name}>
+                          {band.name}{band.units ? ` (${band.units})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Colormap</span>
+                    <select
+                      value={mapColorSettings[index].cmap}
+                      onChange={(event) => updateMapColorSettings(index, { cmap: event.target.value })}
+                    >
+                      {COLORMAPS.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Transform</span>
                     <input
-                      value={mapColorSettings[index].vmin}
-                      onChange={(event) => updateMapColorSettings(index, { vmin: event.target.value })}
-                      disabled={mapColorSettings[index].autoScale}
-                      inputMode="decimal"
+                      value={mapColorSettings[index].transform}
+                      onChange={(event) => updateMapColorSettings(index, { transform: event.target.value })}
+                      placeholder="np.abs(x)"
+                      spellCheck={false}
                     />
                   </label>
-                  <label className="field compact">
-                    <span>Max</span>
+                  <label className="check-row">
                     <input
-                      value={mapColorSettings[index].vmax}
-                      onChange={(event) => updateMapColorSettings(index, { vmax: event.target.value })}
-                      disabled={mapColorSettings[index].autoScale}
-                      inputMode="decimal"
+                      type="checkbox"
+                      checked={mapColorSettings[index].autoScale}
+                      onChange={(event) => updateMapColorSettings(index, { autoScale: event.target.checked })}
                     />
+                    <span>Auto scale</span>
                   </label>
+                  <div className="scale-row">
+                    <label className="field compact">
+                      <span>Min</span>
+                      <input
+                        value={mapColorSettings[index].vmin}
+                        onChange={(event) => updateMapColorSettings(index, { vmin: event.target.value })}
+                        disabled={mapColorSettings[index].autoScale}
+                        inputMode="decimal"
+                      />
+                    </label>
+                    <label className="field compact">
+                      <span>Max</span>
+                      <input
+                        value={mapColorSettings[index].vmax}
+                        onChange={(event) => updateMapColorSettings(index, { vmax: event.target.value })}
+                        disabled={mapColorSettings[index].autoScale}
+                        inputMode="decimal"
+                      />
+                    </label>
+                  </div>
                 </div>
-              </div>
-            ))}
-            <label className="field">
-              <span>Band</span>
-              <select value={activeBand} onChange={(event) => setActiveBand(event.target.value)} disabled={availableBands.length === 0}>
-                {availableBands.map((band) => (
-                  <option key={band.name} value={band.name}>
-                    {band.name}{band.units ? ` (${band.units})` : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
+              );
+            })}
           </section>
 
           <section className="control-section">
@@ -914,10 +920,10 @@ export default function App() {
               <Layers size={28} />
               <span>Add HDF5 files to the data folder, then reload the page.</span>
             </div>
-          ) : !activeBand ? (
+          ) : !selectedMapsHaveBands ? (
             <div className="empty-state">
               <Layers size={28} />
-              <span>Select datasets with at least one shared band.</span>
+              <span>Select a band for each map.</span>
             </div>
           ) : (
             selectedMapSlots.map(({ dataset, slotIndex }) => {
@@ -926,7 +932,7 @@ export default function App() {
                 <MapPanel
                   key={`${dataset.id}-${slotIndex}`}
                   dataset={dataset}
-                  band={activeBand}
+                  band={colorSettings.band}
                   cmap={colorSettings.cmap}
                   autoScale={colorSettings.autoScale}
                   vmin={colorSettings.vmin}
@@ -956,8 +962,10 @@ export default function App() {
               <div className="sample-list">
                 {hoverInfo.samples.map((sample, index) => (
                   <div key={`${sample.dataset_id}:${index}`} className="sample-row">
-                    <strong>{sample.transform ? `${sample.title} (${sample.transform})` : sample.title}</strong>
-                    <span>{sample.in_bounds ? formatValue(sample.active_value, sample.units[activeBand]) : "Outside raster"}</span>
+                    <strong>
+                      {sample.title}{sample.active_band ? ` - ${sample.active_band}` : ""}{sample.transform ? ` (${sample.transform})` : ""}
+                    </strong>
+                    <span>{sample.in_bounds ? formatValue(sample.active_value, sample.units[sample.active_band ?? ""]) : "Outside raster"}</span>
                   </div>
                 ))}
               </div>
@@ -992,7 +1000,7 @@ export default function App() {
             <h2>Profiles</h2>
             <span>{profileStatus || `${transects.length} transect${transects.length === 1 ? "" : "s"}`}</span>
           </div>
-          <ProfilePlot transects={transects} responses={profileResponses} activeBand={activeBand} />
+          <ProfilePlot transects={transects} responses={profileResponses} />
         </section>
       </main>
     </div>

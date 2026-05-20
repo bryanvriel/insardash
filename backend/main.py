@@ -25,6 +25,13 @@ def _request_maps(dataset_ids: list[str] | None, maps: list[MapSelection] | None
     raise HTTPException(status_code=422, detail="Request must include maps or dataset_ids")
 
 
+def _resolve_band(map_selection: MapSelection, fallback_band: str | None) -> str:
+    band = map_selection.band or fallback_band
+    if band is None:
+        raise HTTPException(status_code=422, detail="Each map requires a band or a request-level band")
+    return band
+
+
 def create_app(data_dir: Path | None = None) -> FastAPI:
     store = DatasetStore(Path(data_dir or os.getenv("INSARDASH_DATA_DIR", DEFAULT_DATA_DIR)))
     app = FastAPI(title="InSAR Teaching Explorer", version="0.1.0")
@@ -77,7 +84,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                     map_selection.dataset_id,
                     request.lat,
                     request.lon,
-                    request.band,
+                    _resolve_band(map_selection, request.band),
                     include_all_values=request.include_all_values,
                     transform=map_selection.transform,
                 )
@@ -100,6 +107,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                 points,
                 request.samples,
                 transforms=[map_selection.transform for map_selection in maps],
+                bands=[_resolve_band(map_selection, request.band) for map_selection in maps],
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

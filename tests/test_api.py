@@ -75,6 +75,25 @@ def test_api_dataset_preview_sample_and_transect(tmp_path: Path) -> None:
     assert transformed_sample_body["transform"] == "np.cos(x)"
     assert math.isclose(transformed_sample_body["active_value"], math.cos(fast_sample_body["active_value"]))
 
+    mixed_band_sample = client.post(
+        "/api/sample-point",
+        json={
+            "maps": [
+                {"dataset_id": dataset_id, "band": "unwrapped_phase"},
+                {"dataset_id": dataset_id, "band": "coherence"},
+            ],
+            "lat": 34.5,
+            "lon": -117.5,
+            "include_all_values": False,
+        },
+    )
+    mixed_band_sample_body = mixed_band_sample.json()["samples"]
+    assert mixed_band_sample.status_code == 200
+    assert [sample["active_band"] for sample in mixed_band_sample_body] == ["unwrapped_phase", "coherence"]
+    assert set(mixed_band_sample_body[0]["values"]) == {"unwrapped_phase"}
+    assert set(mixed_band_sample_body[1]["values"]) == {"coherence"}
+    assert mixed_band_sample_body[0]["active_value"] != mixed_band_sample_body[1]["active_value"]
+
     transect = client.post(
         "/api/transect",
         json={
@@ -101,3 +120,38 @@ def test_api_dataset_preview_sample_and_transect(tmp_path: Path) -> None:
     transformed_profile = transformed_transect.json()["profiles"][0]
     assert transformed_profile["transform"] == "x + 1"
     assert math.isclose(transformed_profile["values"][0], raw_profile[0] + 1, abs_tol=1e-6)
+
+    mixed_band_transect = client.post(
+        "/api/transect",
+        json={
+            "maps": [
+                {"dataset_id": dataset_id, "band": "unwrapped_phase"},
+                {"dataset_id": dataset_id, "band": "coherence", "transform": "np.abs(x)"},
+            ],
+            "points": [{"lat": 34.95, "lon": -117.95}, {"lat": 34.05, "lon": -117.05}],
+            "samples": 24,
+        },
+    )
+    mixed_band_transect_body = mixed_band_transect.json()
+    assert mixed_band_transect.status_code == 200
+    assert mixed_band_transect_body["band"] == "mixed"
+    assert [profile["band"] for profile in mixed_band_transect_body["profiles"]] == ["unwrapped_phase", "coherence"]
+    assert mixed_band_transect_body["profiles"][0]["units"] == "rad"
+    assert mixed_band_transect_body["profiles"][1]["units"] == "1"
+    assert mixed_band_transect_body["profiles"][1]["transform"] == "np.abs(x)"
+
+    missing_band_sample = client.post(
+        "/api/sample-point",
+        json={"maps": [{"dataset_id": dataset_id}], "lat": 34.5, "lon": -117.5, "include_all_values": False},
+    )
+    assert missing_band_sample.status_code == 422
+
+    missing_band_transect = client.post(
+        "/api/transect",
+        json={
+            "maps": [{"dataset_id": dataset_id}],
+            "points": [{"lat": 34.95, "lon": -117.95}, {"lat": 34.05, "lon": -117.05}],
+            "samples": 24,
+        },
+    )
+    assert missing_band_transect.status_code == 422

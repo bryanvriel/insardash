@@ -41,6 +41,7 @@ class GeoPoint(BaseModel):
 
 class MapSelection(BaseModel):
     dataset_id: str
+    band: str | None = None
     transform: str | None = None
 
 
@@ -75,7 +76,7 @@ class SamplePointResponse(BaseModel):
 class TransectRequest(BaseModel):
     dataset_ids: list[str] | None = Field(default=None, min_length=1, max_length=3)
     maps: list[MapSelection] | None = Field(default=None, min_length=1, max_length=3)
-    band: str
+    band: str | None = None
     points: list[GeoPoint] = Field(min_length=2)
     samples: int = Field(default=256, ge=2, le=4096)
 
