@@ -23,7 +23,21 @@ Backend commands use the requested interpreter:
 python3 -m pip install -r requirements.txt
 ```
 
-Frontend commands use npm:
+Frontend commands require Node.js 18 or newer. Node 20 LTS is recommended:
+
+```bash
+node --version
+npm --version
+```
+
+If the server has `nvm` installed:
+
+```bash
+nvm install
+nvm use
+```
+
+Frontend commands use npm from that Node environment:
 
 ```bash
 cd frontend
