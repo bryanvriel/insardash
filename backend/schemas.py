@@ -34,6 +34,24 @@ class DatasetSummary(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class BasemapLayer(BaseModel):
+    url: str
+    subdomains: list[str] = Field(default_factory=list)
+    attribution: str
+    max_zoom: int = 18
+
+
+class Basemap(BaseModel):
+    id: str
+    label: str
+    layers: list[BasemapLayer] = Field(default_factory=list)
+
+
+class AppConfig(BaseModel):
+    basemaps: list[Basemap]
+    default_basemap_id: str
+
+
 class GeoPoint(BaseModel):
     lat: float
     lon: float

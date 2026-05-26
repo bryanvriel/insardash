@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,12 +10,14 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .hdf5_store import DatasetError, DatasetStore
-from .schemas import MapSelection, SamplePointRequest, SamplePointResponse, TransectRequest, TransectResponse
+from .schemas import AppConfig, Basemap, BasemapLayer, MapSelection, SamplePointRequest, SamplePointResponse, TransectRequest, TransectResponse
 from .value_transform import TransformError
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = ROOT / "data"
+TIANDITU_KEY_ENV = "INSARDASH_TIANDITU_KEY"
+TIANDITU_SUBDOMAINS = [str(index) for index in range(8)]
 
 
 def _request_maps(dataset_ids: list[str] | None, maps: list[MapSelection] | None) -> list[MapSelection]:
@@ -32,6 +35,27 @@ def _resolve_band(map_selection: MapSelection, fallback_band: str | None) -> str
     return band
 
 
+def _app_config() -> AppConfig:
+    basemaps = [Basemap(id="none", label="None", layers=[])]
+    tianditu_key = os.getenv(TIANDITU_KEY_ENV, "").strip()
+    if tianditu_key:
+        basemaps.append(
+            Basemap(
+                id="tianditu-satellite",
+                label="Tianditu Satellite",
+                layers=[
+                    BasemapLayer(
+                        url=f"https://t{{s}}.tianditu.gov.cn/DataServer?T=img_w&x={{x}}&y={{y}}&l={{z}}&tk={quote(tianditu_key, safe='')}",
+                        subdomains=TIANDITU_SUBDOMAINS,
+                        attribution='&copy; <a href="https://www.tianditu.gov.cn/">Tianditu</a>',
+                        max_zoom=18,
+                    )
+                ],
+            )
+        )
+    return AppConfig(basemaps=basemaps, default_basemap_id=basemaps[-1].id)
+
+
 def create_app(data_dir: Path | None = None) -> FastAPI:
     store = DatasetStore(Path(data_dir or os.getenv("INSARDASH_DATA_DIR", DEFAULT_DATA_DIR)))
     app = FastAPI(title="InSAR Teaching Explorer", version="0.1.0")
@@ -47,6 +71,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/config", response_model=AppConfig)
+    def config() -> AppConfig:
+        return _app_config()
 
     @app.get("/api/datasets")
     def datasets():

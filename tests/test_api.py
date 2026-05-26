@@ -9,6 +9,37 @@ from backend.main import create_app
 from tests.test_hdf5_store import write_fixture
 
 
+def test_api_config_without_tianditu_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("INSARDASH_TIANDITU_KEY", raising=False)
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "basemaps": [{"id": "none", "label": "None", "layers": []}],
+        "default_basemap_id": "none",
+    }
+
+
+def test_api_config_includes_tianditu_satellite_with_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("INSARDASH_TIANDITU_KEY", "test-key")
+    app = create_app(tmp_path)
+    client = TestClient(app)
+
+    response = client.get("/api/config")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["default_basemap_id"] == "tianditu-satellite"
+    assert [basemap["id"] for basemap in body["basemaps"]] == ["none", "tianditu-satellite"]
+    layer = body["basemaps"][1]["layers"][0]
+    assert "T=img_w" in layer["url"]
+    assert "tk=test-key" in layer["url"]
+    assert layer["subdomains"] == ["0", "1", "2", "3", "4", "5", "6", "7"]
+
+
 def test_api_dataset_preview_sample_and_transect(tmp_path: Path) -> None:
     write_fixture(tmp_path / "igram_a.h5")
     app = create_app(tmp_path)

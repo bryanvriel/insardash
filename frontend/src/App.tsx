@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import {
   Check,
+  Image as ImageIcon,
   Layers,
   LocateFixed,
   MousePointer2,
@@ -12,7 +13,7 @@ import {
   X
 } from "lucide-react";
 import type { LatLngBoundsExpression } from "leaflet";
-import { CircleMarker, ImageOverlay, MapContainer, Polyline, ScaleControl, useMap, useMapEvents } from "react-leaflet";
+import { AttributionControl, CircleMarker, ImageOverlay, MapContainer, Polyline, ScaleControl, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import Plot from "react-plotly.js";
 
 type Bounds = {
@@ -40,6 +41,24 @@ type DatasetSummary = {
   bounds: Bounds;
   bands: BandInfo[];
   metadata: Record<string, string | number | boolean>;
+};
+
+type BasemapLayer = {
+  url: string;
+  subdomains: string[];
+  attribution: string;
+  max_zoom: number;
+};
+
+type Basemap = {
+  id: string;
+  label: string;
+  layers: BasemapLayer[];
+};
+
+type AppConfig = {
+  basemaps: Basemap[];
+  default_basemap_id: string;
 };
 
 type GeoPoint = {
@@ -125,6 +144,9 @@ const RESIZE_LARGE_STEP_PX = 48;
 const TWO_COLUMN_LAYOUT_MEDIA = "(max-width: 1120px)";
 const STACKED_LAYOUT_MEDIA = "(max-width: 780px)";
 const TRANSECT_COLORS = ["#d94f35", "#0b8f7a", "#6d5dfc", "#c47b00", "#0077b6", "#b2386b"];
+const DEFAULT_BASEMAP: Basemap = { id: "none", label: "None", layers: [] };
+const DEFAULT_APP_CONFIG: AppConfig = { basemaps: [DEFAULT_BASEMAP], default_basemap_id: DEFAULT_BASEMAP.id };
+const DEFAULT_RASTER_OPACITY = 0.8;
 const PlotComponent = Plot as any;
 
 function defaultMapColorSettings(): MapColorSettings {
@@ -164,6 +186,14 @@ function centerOfBounds(bounds: Bounds): [number, number] {
 
 function normalizeTransform(transform: string) {
   return transform.trim();
+}
+
+function normalizeAppConfig(config: AppConfig): AppConfig {
+  const basemaps = config.basemaps.length > 0 ? config.basemaps : DEFAULT_APP_CONFIG.basemaps;
+  const defaultBasemapId = basemaps.some((basemap) => basemap.id === config.default_basemap_id)
+    ? config.default_basemap_id
+    : basemaps[0].id;
+  return { basemaps, default_basemap_id: defaultBasemapId };
 }
 
 function makePreviewUrl(datasetId: string, band: string, cmap: string, autoScale: boolean, vmin: string, vmax: string, transform: string) {
@@ -255,6 +285,8 @@ function MapPanel({
   vmin,
   vmax,
   transform,
+  basemap,
+  rasterOpacity,
   viewport,
   drawing,
   transects,
@@ -270,6 +302,8 @@ function MapPanel({
   vmin: string;
   vmax: string;
   transform: string;
+  basemap: Basemap;
+  rasterOpacity: number;
   viewport: Viewport | null;
   drawing: boolean;
   transects: Transect[];
@@ -304,7 +338,17 @@ function MapPanel({
         scrollWheelZoom
         attributionControl={false}
       >
-        <ImageOverlay url={previewUrl} bounds={mapBounds} opacity={1} />
+        <AttributionControl position="bottomright" prefix={false} />
+        {basemap.layers.map((layer, index) => (
+          <TileLayer
+            key={`${basemap.id}-${index}`}
+            url={layer.url}
+            subdomains={layer.subdomains}
+            attribution={layer.attribution}
+            maxZoom={layer.max_zoom}
+          />
+        ))}
+        <ImageOverlay url={previewUrl} bounds={mapBounds} opacity={rasterOpacity} />
         {transects.map((transect) => (
           <Polyline
             key={transect.id}
@@ -403,6 +447,9 @@ function ProfilePlot({
 }
 
 export default function App() {
+  const [appConfig, setAppConfig] = useState<AppConfig>(DEFAULT_APP_CONFIG);
+  const [selectedBasemapId, setSelectedBasemapId] = useState(DEFAULT_APP_CONFIG.default_basemap_id);
+  const [rasterOpacity, setRasterOpacity] = useState(DEFAULT_RASTER_OPACITY);
   const [datasets, setDatasets] = useState<DatasetSummary[]>([]);
   const [selectedIds, setSelectedIds] = useState<Array<string | null>>([null, null, null]);
   const [mapColorSettings, setMapColorSettings] = useState<MapColorSettings[]>(() => MAP_SLOTS.map(() => defaultMapColorSettings()));
@@ -455,6 +502,34 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    fetch("/api/config")
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Config request failed with ${response.status}`);
+        }
+        return response.json() as Promise<AppConfig>;
+      })
+      .then((config) => {
+        if (cancelled) {
+          return;
+        }
+        const normalized = normalizeAppConfig(config);
+        setAppConfig(normalized);
+        setSelectedBasemapId(normalized.default_basemap_id);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAppConfig(DEFAULT_APP_CONFIG);
+          setSelectedBasemapId(DEFAULT_APP_CONFIG.default_basemap_id);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     fetch("/api/datasets")
       .then((response) => {
         if (!response.ok) {
@@ -493,6 +568,14 @@ export default function App() {
   );
 
   const selectedDatasets = useMemo(() => selectedMapSlots.map((slot) => slot.dataset), [selectedMapSlots]);
+  const selectedBasemap = useMemo(
+    () =>
+      appConfig.basemaps.find((basemap) => basemap.id === selectedBasemapId) ??
+      appConfig.basemaps.find((basemap) => basemap.id === appConfig.default_basemap_id) ??
+      appConfig.basemaps[0] ??
+      DEFAULT_BASEMAP,
+    [appConfig, selectedBasemapId]
+  );
   useEffect(() => {
     setMapColorSettings((items) =>
       items.map((settings, index) => {
@@ -777,6 +860,34 @@ export default function App() {
       >
         <aside className="control-panel" aria-label="Display controls">
           <section className="control-section">
+            <h2><ImageIcon size={17} /> Background</h2>
+            <label className="field">
+              <span>Basemap</span>
+              <select value={selectedBasemap.id} onChange={(event) => setSelectedBasemapId(event.target.value)}>
+                {appConfig.basemaps.map((basemap) => (
+                  <option key={basemap.id} value={basemap.id}>
+                    {basemap.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field opacity-field">
+              <span>
+                Raster opacity
+                <strong>{Math.round(rasterOpacity * 100)}%</strong>
+              </span>
+              <input
+                type="range"
+                min="0.25"
+                max="1"
+                step="0.05"
+                value={rasterOpacity}
+                onChange={(event) => setRasterOpacity(Number(event.target.value))}
+              />
+            </label>
+          </section>
+
+          <section className="control-section">
             <h2><Layers size={17} /> Maps</h2>
             {MAP_SLOTS.map((index) => {
               const selectedDataset = datasets.find((dataset) => dataset.id === selectedIds[index]);
@@ -938,6 +1049,8 @@ export default function App() {
                   vmin={colorSettings.vmin}
                   vmax={colorSettings.vmax}
                   transform={colorSettings.transform}
+                  basemap={selectedBasemap}
+                  rasterOpacity={rasterOpacity}
                   viewport={viewport}
                   drawing={drawing}
                   transects={transects}

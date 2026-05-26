@@ -60,6 +60,16 @@ INSARDASH_DATA_DIR=insardash/data \
 python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
+Optional Tianditu satellite basemap:
+
+```bash
+INSARDASH_DATA_DIR=insardash/data \
+INSARDASH_TIANDITU_KEY=YOUR_TIANDITU_KEY \
+python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+When `INSARDASH_TIANDITU_KEY` is set, the app exposes a Tianditu satellite background option using browser-direct tile requests. Because the browser loads tiles directly, the Tianditu key is visible to students in network traffic; use a key intended for client-side web maps and configure any domain restrictions in the Tianditu developer console.
+
 Students on the university network can open:
 
 ```text
